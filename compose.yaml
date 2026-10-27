@@ -1,0 +1,142 @@
+name: telegram-catalog
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql+asyncpg://catalog:${POSTGRES_PASSWORD:?Run setup_env.py}@postgres:5432/catalog
+  INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?Run setup_env.py}
+  S3_ENDPOINT: http://minio:9000
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:?Run setup_env.py}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:?Run setup_env.py}
+  S3_BUCKET: catalog-images
+  WEBHOOK_SECRET: ${WEBHOOK_SECRET:?Run setup_env.py}
+  BOT_TOKEN: ${BOT_TOKEN:-}
+  ADMIN_IDS: ${ADMIN_IDS:-}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+  API_BASE_URL: http://gateway:8081
+
+x-backend: &backend
+  image: telegram-catalog-backend:local
+  build: ./backend
+  environment: *app-env
+  read_only: true
+  tmpfs: [/tmp]
+  restart: unless-stopped
+  init: true
+
+services:
+  postgres:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: catalog
+      POSTGRES_USER: catalog
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run setup_env.py}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U catalog -d catalog"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    build:
+      context: ./infra
+      dockerfile: minio.Dockerfile
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:?Run setup_env.py}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?Run setup_env.py}
+    volumes: [minio-data:/data]
+    healthcheck:
+      test: [CMD, curl, -f, http://localhost:9000/minio/health/live]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+    restart: unless-stopped
+
+  init:
+    <<: *backend
+    restart: "no"
+    command: [sh, -c, "alembic upgrade head && python -m app.manage init-storage"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      minio: {condition: service_healthy}
+
+  api:
+    <<: *backend
+    depends_on:
+      init: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  bot:
+    <<: *backend
+    command: [uvicorn, "app.bot:create_app", --factory, --host, 0.0.0.0, --port, "8000", --no-access-log]
+    depends_on:
+      init: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  web:
+    build: ./frontend
+    environment:
+      API_BASE_URL: http://gateway:8081
+      NEXT_TELEMETRY_DISABLED: "1"
+    read_only: true
+    tmpfs: [/tmp]
+    init: true
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/health/live').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  gateway:
+    image: nginx:1.28-alpine
+    ports: ["127.0.0.1:${PORT:-8080}:80"]
+    volumes: [./infra/nginx.conf:/etc/nginx/nginx.conf:ro]
+    depends_on:
+      api: {condition: service_healthy}
+      bot: {condition: service_healthy}
+      web: {condition: service_healthy}
+    restart: unless-stopped
+
+  test-postgres:
+    profiles: [test]
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: catalog_test
+      POSTGRES_USER: catalog
+      POSTGRES_PASSWORD: test-only-password
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U catalog -d catalog_test"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  tests:
+    profiles: [test]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.test
+    environment:
+      TEST_DATABASE_URL: postgresql+asyncpg://catalog:test-only-password@test-postgres:5432/catalog_test
+      TEST_S3_ENDPOINT: http://minio:9000
+      TEST_S3_ACCESS_KEY: ${S3_ACCESS_KEY:?Run setup_env.py}
+      TEST_S3_SECRET_KEY: ${S3_SECRET_KEY:?Run setup_env.py}
+    read_only: true
+    tmpfs: [/tmp]
+    depends_on:
+      test-postgres: {condition: service_healthy}
+      minio: {condition: service_healthy}
+
+volumes:
+  postgres-data:
+  minio-data:

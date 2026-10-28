@@ -13,7 +13,7 @@ python -m venv .venv
 pip install -r requirements-dev.txt
 ```
 
-Настройте окружение, не добавляя секреты в tracked файлы:
+Настройте окружение, не добавляя секреты в файлы, отслеживаемые Git:
 
 - `DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@localhost:5432/catalog`
 - `INTERNAL_API_TOKEN`: случайная строка не короче 32 символов

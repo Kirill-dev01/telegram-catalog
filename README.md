@@ -194,5 +194,3 @@ docker compose down
 
 Инструкции запуска компонентов вне Docker: [DEVELOPMENT.md](docs/DEVELOPMENT.md).
 Официальная документация используемых технологий: [SOURCES.md](docs/SOURCES.md).
-
-При разработке использовались AI-инструменты.
